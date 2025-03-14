@@ -1,0 +1,1170 @@
+---
+title: "CHEK2_UKB_LM"
+output: html_document
+date: "2025-03-06"
+---
+
+```{r}
+pacman::p_load(
+  rio,          # File import
+  here,         # File locator
+  tidyverse,    # data management + ggplot2 graphics, 
+  stringr,      # manipulate text strings 
+  purrr,        # loop over objects in a tidy way
+  gtsummary,    # summary statistics and tests 
+  broom,        # tidy up results from regressions
+  lmtest,       # likelihood-ratio tests
+  parameters,   # alternative to tidy up results from regressions
+  see,          # alternative to visualise forest plots
+  readxl
+)
+```
+
+
+```{r}
+pheno_ukb<-read_excel("R:/Medicine/Hematology-Oncology/Godley_Lab/UK_Biobank/CHEK2/Proteomics/Phenotype_UKB_Minus_Cancer_risk.xlsx")
+
+model_df<- pheno_ukb[, c("eid", "Sex", "Age_at_recruitment","Malignant_Cancer_Status","Age_at_First_Cancer","Cancer_Type","Heme_Type","First_Cancer_Code")]
+
+
+# Rename columns by index
+colnames(model_df)[colnames(model_df) == "Cancer_Type_x"] <- "Cancer_Type"
+```
+
+#Read_CHEK2_Status
+```{r}
+chek2_pids<-read.csv("R:/Medicine/Hematology-Oncology/Godley_Lab/UK_Biobank/CHEK2/Proteomics/CHEK2_alleles_PLP.csv")
+# Add a new column 'CHEK2_Status' where the value is 'Yes' if EID is in the chek2_eids list
+model_df$CHEK2_Status <- ifelse(model_df$eid %in% unique(chek2_pids$Participant.ID), 1, 0)
+table(model_df$CHEK2_Status)
+```
+
+
+
+```{r}
+library(dplyr)
+
+
+
+# Create binary columns for each Cancer_Type category
+model_df <- model_df %>%
+  mutate(
+    Heme_malignancy_Status = ifelse(Cancer_Type == 'Heme_Malignancy', 1, 0),
+    Solid_tumor_Status = ifelse(Cancer_Type == 'Solid_Tumor', 1, 0),
+    Other_Malignancy = ifelse(Cancer_Type == 'Other_Malignancy_Secondary', 1, 0)
+  )
+
+# Create binary columns for each Cancer_Type category
+model_df <- model_df %>%
+  mutate(
+    Myeloid_Status = ifelse(Heme_Type == 'Myeloid', 1, 0),
+    Lymphoid_Status = ifelse(Heme_Type == 'Lymphoid', 1, 0),
+      )
+
+
+```
+
+
+Category
+
+```{r}
+
+icd10_dict<-read_excel("R:/Medicine/Hematology-Oncology/Godley_Lab/UK_Biobank/CHEK2/Proteomics/Coding/Merged_ICD10_Categories.xlsx")
+
+model_df$First_Cancer_Code_Broad <- ifelse(is.na(model_df$First_Cancer_Code), NA, substr(model_df$First_Cancer_Code, 1, 3))
+icd_broad_unique<-icd10_dict[, c("ICD10_Broad", "Description_Broad")]
+icd_broad_unique <- unique(icd_broad_unique)
+
+# Merge with icd10_dict to get Description_Broad
+model_df <- merge(model_df, icd_broad_unique[, c("ICD10_Broad", "Description_Broad")], 
+            by.x = "First_Cancer_Code_Broad", by.y = "ICD10_Broad",all.x = TRUE)
+
+model_df$Description_Broad[model_df$Description_Broad == "Carcinoma in situ of breast"] <- "Malignant neoplasm of breast"
+
+
+```
+
+
+
+#Smoking Status
+```{r}
+smoking_status<-read.csv("R:/Medicine/Hematology-Oncology/Godley_Lab/UK_Biobank/CHEK2/Proteomics/Smoking_Status_UKB.csv")
+smoking_status <- smoking_status %>%
+  mutate(Smoking_Status = ifelse(rowSums(select(., starts_with("p20160")) == 1, na.rm = TRUE) > 0, 1, 0))
+
+table(smoking_status$p20160_i0)
+model_df<-merge(model_df,smoking_status,by="eid",how="inner")
+
+# Drop specific columns by name
+model_df <- model_df[, !names(model_df) %in% c("p21022","p31","p20160_i0","p20160_i1","p20160_i2", "p20160_i3")]
+
+
+
+```
+
+#Age of Onset of Cancer
+
+```{r}
+# Rename columns by index
+colnames(model_df)[colnames(model_df) == "p34"] <- "Birth_Year"
+
+# Assuming 'birth_year' is the column containing birth years
+model_df$current_age <- 2025 - model_df$Birth_Year
+
+
+# Assuming the columns are 'Malignant_Status', 'Age_at_recruitment', and 'Age_at_first_cancer'
+model_df$Age <- ifelse(model_df$Malignant_Cancer_Status == FALSE, model_df$Age_at_recruitment, model_df$Age_at_First_Cancer)
+```
+
+
+#Convert Malignant Cancer to Binary
+```{r}
+# Convert "TRUE"/"FALSE" to 1/0
+model_df$Malignant_Cancer_Status <- ifelse(model_df$Malignant_Cancer_Status == "TRUE", 1, ifelse(model_df$Malignant_Cancer_Status == "FALSE", 0, NA))
+```
+
+
+#Convert Sex to Binary
+```{r}
+# Convert "Male"/"Female" to 1/0
+model_df$Sex <- ifelse(model_df$Sex == "Male", 1, ifelse(model_df$Sex == "Female", 0, NA))
+table(model_df$Sex)
+```
+
+
+#Create age decile 0-10,10-20,20-30 etc
+```{r}
+model_df <- model_df %>%
+  mutate(age_cat = cut(Age, 
+                       breaks = seq(0, 100, by = 10), 
+                       labels = paste0(seq(10, 100, by = 10), "s"), 
+                       include.lowest = TRUE, 
+                       right = FALSE))
+```
+
+
+```{r}
+
+
+# Convert to binary form
+model_df_wide <- model_df %>%
+  mutate(Present = 1) %>%  # Add a column with 1 for presence
+  pivot_wider(names_from = Description_Broad, values_from = Present, values_fill = list(Present = 0))
+
+
+model_df_wide$Lymphoid_Status[is.na(model_df_wide$Lymphoid_Status)] <- 0
+model_df_wide$Myeloid_Status[is.na(model_df_wide$Myeloid_Status)] <- 0
+model_df_wide$Heme_malignancy_Status[is.na(model_df_wide$Heme_malignancy_Status)] <- 0
+model_df_wide$Solid_tumor_Status[is.na(model_df_wide$Solid_tumor_Status)] <- 0
+
+
+```
+
+
+
+
+
+#Explanatory Variables/ Co-variates
+```{r}
+explanatory_vars<-c("Sex","Age","CHEK2_Status","Smoking_Status")
+
+
+## drop rows with missing information for variables of interest 
+model_df_final <- model_df %>% 
+  drop_na(any_of(explanatory_vars))
+
+
+# Check for NA values in the explanatory variables columns
+na_positions <- model_df %>%
+  select(any_of(explanatory_vars)) %>%
+  is.na()
+
+table(model_df_final$CHEK2_Status)
+
+
+
+
+```
+
+
+
+
+
+
+#Test glm with one Variable CHEK2 Status
+
+
+```{r}
+model_df_final %>% 
+  mutate(CHEK2_Status = as.factor(CHEK2_Status)) %>%  # Convert to factor
+  glm(formula = Malignant_Cancer_Status ~ CHEK2_Status, family = binomial, data = .) %>% 
+  summary()
+```
+#Univariate
+```{r}
+models <- explanatory_vars %>%       # begin with variables of interest
+  str_c("Malignant_Cancer_Status ~ ", .) %>%         # combine each variable into formula ("outcome ~ variable of interest")
+  # iterate through each univariate formula
+  map(                               
+    .f = ~glm(                       # pass the formulas one-by-one to glm()
+      formula = as.formula(.x),      # within glm(), the string formula is .x
+      family = "binomial",           # specify type of glm (logistic)
+      data = model_df_final)) %>%          # dataset
+  
+  # tidy up each of the glm regression outputs from above
+  map(
+    .f = ~tidy(
+      .x, 
+      exponentiate = TRUE,           # exponentiate 
+      conf.int = TRUE)) %>%          # return confidence intervals
+  
+  # collapse the list of regression outputs in to one data frame
+  bind_rows() %>% 
+  
+  # round all numeric columns
+  mutate(across(where(is.numeric), round, digits = 2))
+```
+
+
+```{r}
+#
+
+univ_tab <- model_df_final %>% 
+  dplyr::select(explanatory_vars, Malignant_Cancer_Status) %>% ## select variables of interest
+
+  tbl_uvregression(                         ## produce univariate table
+    method = glm,                           ## define regression want to run (generalised linear model)
+    y = Malignant_Cancer_Status,                            ## define outcome variable
+    method.args = list(family = binomial),  ## define what type of glm want to run (logistic)
+    exponentiate = TRUE                     ## exponentiate to produce odds ratios (rather than log odds)
+  )
+```
+
+
+```{r}
+univ_tab
+```
+
+
+##Multivariate Regression
+```{r}
+
+mv_reg <- glm(Malignant_Cancer_Status ~ Sex + Age + CHEK2_Status+Smoking_Status,family = "binomial", data = model_df_final)
+
+summary(mv_reg)
+
+```
+
+
+
+```{r}
+pacman::p_load(easystats)
+
+## remove the intercept term from your multivariable results
+mv_reg %>% 
+  model_parameters(exponentiate = TRUE) %>% 
+  plot()
+```
+
+
+
+```{r}
+## choose a model using forward selection based on AIC
+## you can also do "backward" or "both" by adjusting the direction
+final_mv_reg <- mv_reg %>%
+  step(direction = "forward", trace = FALSE)
+
+mv_tab_base <- final_mv_reg %>% 
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%  ## get a tidy dataframe of estimates 
+  mutate(across(where(is.numeric), round, digits = 2))     
+
+mv_tab <- tbl_regression(final_mv_reg, exponentiate = TRUE)
+
+
+## combine with univariate results 
+tbl_merge(
+  tbls = list(univ_tab, mv_tab),                          # combine
+  tab_spanner = c("**Univariate**", "**Multivariable**")) # set header names
+```
+
+
+#By Cancer Types
+```{r}
+explanatory_vars<-c("Sex","Age","CHEK2_Status","Smoking_Status")
+
+
+## drop rows with missing information for variables of interest 
+model_df_wide <- model_df %>% 
+  drop_na(any_of(explanatory_vars))
+
+
+# Check for NA values in the explanatory variables columns
+na_positions <- model_df %>%
+  select(any_of(explanatory_vars)) %>%
+  is.na()
+
+table(model_df_wide$CHEK2_Status)
+```
+
+
+#Check why only 1062 in CHEK2
+
+```{r}
+
+problematic_rows <- model_df %>%
+filter(CHEK2_Status == 1 &  Malignant_Cancer_Status == 1 )
+
+
+blank_rows<-problematic_rows[which(is.na(problematic_rows$Cancer_Type)),]
+
+blank_cancer<-pheno_ukb[pheno_ukb$eid%in%blank_rows$eid,]
+```
+
+
+
+
+
+#Univariate
+```{r}
+models <- explanatory_vars %>%       # begin with variables of interest
+  str_c("Heme_malignancy_Status ~ ", .) %>%         # combine each variable into formula ("outcome ~ variable of interest")
+  # iterate through each univariate formula
+  map(                               
+    .f = ~glm(                       # pass the formulas one-by-one to glm()
+      formula = as.formula(.x),      # within glm(), the string formula is .x
+      family = "binomial",           # specify type of glm (logistic)
+      data = model_df_wide)) %>%          # dataset
+  
+  # tidy up each of the glm regression outputs from above
+  map(
+    .f = ~tidy(
+      .x, 
+      exponentiate = TRUE,           # exponentiate 
+      conf.int = TRUE)) %>%          # return confidence intervals
+  
+  # collapse the list of regression outputs in to one data frame
+  bind_rows() %>% 
+  
+  # round all numeric columns
+  mutate(across(where(is.numeric), round, digits = 2))
+
+
+```
+
+
+```{r}
+#
+
+univ_tab <- model_df_wide %>% 
+  dplyr::select(explanatory_vars, Heme_malignancy_Status) %>% ## select variables of interest
+
+  tbl_uvregression(                         ## produce univariate table
+    method = glm,                           ## define regression want to run (generalised linear model)
+    y = Heme_malignancy_Status,                            ## define outcome variable
+    method.args = list(family = binomial),  ## define what type of glm want to run (logistic)
+    exponentiate = TRUE                     ## exponentiate to produce odds ratios (rather than log odds)
+  )
+```
+
+
+```{r}
+univ_tab
+```
+
+
+
+##Multivariate Regression
+```{r}
+
+mv_reg <- glm(Heme_malignancy_Status ~ Sex + Age + CHEK2_Status+Smoking_Status,family = "binomial", data = model_df_wide)
+
+summary(mv_reg)
+
+```
+
+```{r}
+pacman::p_load(easystats)
+
+## remove the intercept term from your multivariable results
+mv_reg %>% 
+  model_parameters(exponentiate = TRUE) %>% 
+  plot()
+```
+
+
+
+```{r}
+## choose a model using forward selection based on AIC
+## you can also do "backward" or "both" by adjusting the direction
+final_mv_reg <- mv_reg %>%
+  step(direction = "forward", trace = FALSE)
+
+mv_tab_base <- final_mv_reg %>% 
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%  ## get a tidy dataframe of estimates 
+  mutate(across(where(is.numeric), round, digits = 2))     
+
+mv_tab <- tbl_regression(final_mv_reg, exponentiate = TRUE)
+
+
+## combine with univariate results 
+tbl_merge(
+  tbls = list(univ_tab, mv_tab),                          # combine
+  tab_spanner = c("**Univariate**", "**Multivariable**")) # set header names
+```
+
+
+#Solid Tumor
+
+
+#Univariate
+```{r}
+models <- explanatory_vars %>%       # begin with variables of interest
+  str_c("Solid_tumor_Status ~ ", .) %>%         # combine each variable into formula ("outcome ~ variable of interest")
+  # iterate through each univariate formula
+  map(                               
+    .f = ~glm(                       # pass the formulas one-by-one to glm()
+      formula = as.formula(.x),      # within glm(), the string formula is .x
+      family = "binomial",           # specify type of glm (logistic)
+      data = model_df_wide)) %>%          # dataset
+  
+  # tidy up each of the glm regression outputs from above
+  map(
+    .f = ~tidy(
+      .x, 
+      exponentiate = TRUE,           # exponentiate 
+      conf.int = TRUE)) %>%          # return confidence intervals
+  
+  # collapse the list of regression outputs in to one data frame
+  bind_rows() %>% 
+  
+  # round all numeric columns
+  mutate(across(where(is.numeric), round, digits = 2))
+```
+
+
+```{r}
+#
+
+univ_tab <- model_df_wide %>% 
+  dplyr::select(explanatory_vars, Solid_tumor_Status) %>% ## select variables of interest
+
+  tbl_uvregression(                         ## produce univariate table
+    method = glm,                           ## define regression want to run (generalised linear model)
+    y = Solid_tumor_Status,                            ## define outcome variable
+    method.args = list(family = binomial),  ## define what type of glm want to run (logistic)
+    exponentiate = TRUE                     ## exponentiate to produce odds ratios (rather than log odds)
+  )
+```
+
+
+```{r}
+univ_tab
+```
+
+
+
+
+##Multivariate Regression
+```{r}
+
+mv_reg <- glm(Solid_tumor_Status ~ Sex + Age + CHEK2_Status+Smoking_Status,family = "binomial", data = model_df_wide)
+
+summary(mv_reg)
+
+```
+
+
+```{r}
+pacman::p_load(easystats)
+
+## remove the intercept term from your multivariable results
+mv_reg %>% 
+  model_parameters(exponentiate = TRUE) %>% 
+  plot()
+```
+
+
+```{r}
+## choose a model using forward selection based on AIC
+## you can also do "backward" or "both" by adjusting the direction
+final_mv_reg <- mv_reg %>%
+  step(direction = "forward", trace = FALSE)
+
+mv_tab_base <- final_mv_reg %>% 
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%  ## get a tidy dataframe of estimates 
+  mutate(across(where(is.numeric), round, digits = 2))     
+
+mv_tab <- tbl_regression(final_mv_reg, exponentiate = TRUE)
+
+
+## combine with univariate results 
+tbl_merge(
+  tbls = list(univ_tab, mv_tab),                          # combine
+  tab_spanner = c("**Univariate**", "**Multivariable**")) # set header names
+```
+
+
+
+
+
+#Myeloid Malignancy
+
+
+#Univariate
+```{r}
+models <- explanatory_vars %>%       # begin with variables of interest
+  str_c("Myeloid_Status ~ ", .) %>%         # combine each variable into formula ("outcome ~ variable of interest")
+  # iterate through each univariate formula
+  map(                               
+    .f = ~glm(                       # pass the formulas one-by-one to glm()
+      formula = as.formula(.x),      # within glm(), the string formula is .x
+      family = "binomial",           # specify type of glm (logistic)
+      data = model_df_wide)) %>%          # dataset
+  
+  # tidy up each of the glm regression outputs from above
+  map(
+    .f = ~tidy(
+      .x, 
+      exponentiate = TRUE,           # exponentiate 
+      conf.int = TRUE)) %>%          # return confidence intervals
+  
+  # collapse the list of regression outputs in to one data frame
+  bind_rows() %>% 
+  
+  # round all numeric columns
+  mutate(across(where(is.numeric), round, digits = 2))
+```
+
+
+```{r}
+#
+
+univ_tab <- model_df_wide %>% 
+  dplyr::select(explanatory_vars, Myeloid_Status) %>% ## select variables of interest
+
+  tbl_uvregression(                         ## produce univariate table
+    method = glm,                           ## define regression want to run (generalised linear model)
+    y = Myeloid_Status,                            ## define outcome variable
+    method.args = list(family = binomial),  ## define what type of glm want to run (logistic)
+    exponentiate = TRUE                     ## exponentiate to produce odds ratios (rather than log odds)
+  )
+```
+
+
+```{r}
+univ_tab
+```
+
+##Multivariate Regression
+```{r}
+
+mv_reg <- glm(Myeloid_Status ~ Sex + Age + CHEK2_Status+Smoking_Status,family = "binomial", data = model_df_wide)
+
+summary(mv_reg)
+
+```
+
+```{r}
+pacman::p_load(easystats)
+
+## remove the intercept term from your multivariable results
+mv_reg %>% 
+  model_parameters(exponentiate = TRUE) %>% 
+  plot()
+```
+
+
+
+```{r}
+## choose a model using forward selection based on AIC
+## you can also do "backward" or "both" by adjusting the direction
+final_mv_reg <- mv_reg %>%
+  step(direction = "forward", trace = FALSE)
+
+mv_tab_base <- final_mv_reg %>% 
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%  ## get a tidy dataframe of estimates 
+  mutate(across(where(is.numeric), round, digits = 2))     
+
+mv_tab <- tbl_regression(final_mv_reg, exponentiate = TRUE)
+
+
+## combine with univariate results 
+tbl_merge(
+  tbls = list(univ_tab, mv_tab),                          # combine
+  tab_spanner = c("**Univariate**", "**Multivariable**")) # set header names
+```
+
+
+
+#Lymphoid Malignancy
+
+#Univariate
+```{r}
+models <- explanatory_vars %>%       # begin with variables of interest
+  str_c("Lymphoid_Status ~ ", .) %>%         # combine each variable into formula ("outcome ~ variable of interest")
+  # iterate through each univariate formula
+  map(                               
+    .f = ~glm(                       # pass the formulas one-by-one to glm()
+      formula = as.formula(.x),      # within glm(), the string formula is .x
+      family = "binomial",           # specify type of glm (logistic)
+      data = model_df_wide)) %>%          # dataset
+  
+  # tidy up each of the glm regression outputs from above
+  map(
+    .f = ~tidy(
+      .x, 
+      exponentiate = TRUE,           # exponentiate 
+      conf.int = TRUE)) %>%          # return confidence intervals
+  
+  # collapse the list of regression outputs in to one data frame
+  bind_rows() %>% 
+  
+  # round all numeric columns
+  mutate(across(where(is.numeric), round, digits = 2))
+```
+
+
+```{r}
+#
+
+univ_tab <- model_df_wide %>% 
+  dplyr::select(explanatory_vars, Lymphoid_Status) %>% ## select variables of interest
+
+  tbl_uvregression(                         ## produce univariate table
+    method = glm,                           ## define regression want to run (generalised linear model)
+    y = Lymphoid_Status,                            ## define outcome variable
+    method.args = list(family = binomial),  ## define what type of glm want to run (logistic)
+    exponentiate = TRUE                     ## exponentiate to produce odds ratios (rather than log odds)
+  )
+
+univ_tab
+```
+
+
+
+
+##Multivariate Regression
+```{r}
+
+mv_reg <- glm(Lymphoid_Status ~ Sex + Age + CHEK2_Status+Smoking_Status,family = "binomial", data = model_df_wide)
+
+summary(mv_reg)
+
+```
+```{r}
+pacman::p_load(easystats)
+
+## remove the intercept term from your multivariable results
+mv_reg %>% 
+  model_parameters(exponentiate = TRUE) %>% 
+  plot()
+```
+
+
+```{r}
+## choose a model using forward selection based on AIC
+## you can also do "backward" or "both" by adjusting the direction
+final_mv_reg <- mv_reg %>%
+  step(direction = "forward", trace = FALSE)
+
+mv_tab_base <- final_mv_reg %>% 
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%  ## get a tidy dataframe of estimates 
+  mutate(across(where(is.numeric), round, digits = 2))     
+
+mv_tab <- tbl_regression(final_mv_reg, exponentiate = TRUE)
+
+
+## combine with univariate results 
+tbl_merge(
+  tbls = list(univ_tab, mv_tab),                          # combine
+  tab_spanner = c("**Univariate**", "**Multivariable**")) # set header names
+```
+#Malignant Neoplasm of Breast
+```{r}
+explanatory_vars<-c("Sex","Age","CHEK2_Status","Smoking_Status")
+
+
+## drop rows with missing information for variables of interest 
+model_df_wide <- model_df_wide %>% 
+  drop_na(any_of(explanatory_vars))
+
+
+# Check for NA values in the explanatory variables columns
+na_positions <- model_df %>%
+  select(any_of(explanatory_vars)) %>%
+  is.na()
+
+table(model_df_wide$CHEK2_Status)
+
+
+# Replace spaces with underscores
+colnames(model_df_wide) <- gsub(" ", "_", names(model_df_wide))
+
+```
+
+
+#Univariate
+```{r}
+models <- explanatory_vars %>%       # begin with variables of interest
+  str_c("Malignant_neoplasm_of_breast ~ ", .) %>%         # combine each variable into formula ("outcome ~ variable of interest")
+  # iterate through each univariate formula
+  map(                               
+    .f = ~glm(                       # pass the formulas one-by-one to glm()
+      formula = as.formula(.x),      # within glm(), the string formula is .x
+      family = "binomial",           # specify type of glm (logistic)
+      data = model_df_wide)) %>%          # dataset
+  
+  # tidy up each of the glm regression outputs from above
+  map(
+    .f = ~tidy(
+      .x, 
+      exponentiate = TRUE,           # exponentiate 
+      conf.int = TRUE)) %>%          # return confidence intervals
+  
+  # collapse the list of regression outputs in to one data frame
+  bind_rows() %>% 
+  
+  # round all numeric columns
+  mutate(across(where(is.numeric), round, digits = 2))
+```
+
+
+```{r}
+#
+
+univ_tab <- model_df_wide %>% 
+  dplyr::select(explanatory_vars, Malignant_neoplasm_of_breast) %>% ## select variables of interest
+
+  tbl_uvregression(                         ## produce univariate table
+    method = glm,                           ## define regression want to run (generalised linear model)
+    y = Malignant_neoplasm_of_breast,                            ## define outcome variable
+    method.args = list(family = binomial),  ## define what type of glm want to run (logistic)
+    exponentiate = TRUE                     ## exponentiate to produce odds ratios (rather than log odds)
+  )
+
+univ_tab
+```
+
+##Multivariate Regression
+```{r}
+
+mv_reg <- glm(Malignant_neoplasm_of_breast ~ Sex + Age + CHEK2_Status+Smoking_Status,family = "binomial", data = model_df_wide)
+
+summary(mv_reg)
+
+```
+
+
+```{r}
+pacman::p_load(easystats)
+
+## remove the intercept term from your multivariable results
+mv_reg %>% 
+  model_parameters(exponentiate = TRUE) %>% 
+  plot()
+```
+
+
+```{r}
+## choose a model using forward selection based on AIC
+## you can also do "backward" or "both" by adjusting the direction
+final_mv_reg <- mv_reg %>%
+  step(direction = "forward", trace = FALSE)
+
+mv_tab_base <- final_mv_reg %>% 
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%  ## get a tidy dataframe of estimates 
+  mutate(across(where(is.numeric), round, digits = 2))     
+
+mv_tab <- tbl_regression(final_mv_reg, exponentiate = TRUE)
+
+
+## combine with univariate results 
+tbl_merge(
+  tbls = list(univ_tab, mv_tab),                          # combine
+  tab_spanner = c("**Univariate**", "**Multivariable**")) # set header names
+```
+
+#Malignant Neoplasm of Prostate
+
+#Univariate
+```{r}
+models <- explanatory_vars %>%       # begin with variables of interest
+  str_c("Malignant_neoplasm_of_prostate ~ ", .) %>%         # combine each variable into formula ("outcome ~ variable of interest")
+  # iterate through each univariate formula
+  map(                               
+    .f = ~glm(                       # pass the formulas one-by-one to glm()
+      formula = as.formula(.x),      # within glm(), the string formula is .x
+      family = "binomial",           # specify type of glm (logistic)
+      data = model_df_wide)) %>%          # dataset
+  
+  # tidy up each of the glm regression outputs from above
+  map(
+    .f = ~tidy(
+      .x, 
+      exponentiate = TRUE,           # exponentiate 
+      conf.int = TRUE)) %>%          # return confidence intervals
+  
+  # collapse the list of regression outputs in to one data frame
+  bind_rows() %>% 
+  
+  # round all numeric columns
+  mutate(across(where(is.numeric), round, digits = 2))
+
+
+univ_tab <- model_df_wide %>% 
+  dplyr::select(explanatory_vars, Malignant_neoplasm_of_prostate) %>% ## select variables of interest
+
+  tbl_uvregression(                         ## produce univariate table
+    method = glm,                           ## define regression want to run (generalised linear model)
+    y = Malignant_neoplasm_of_prostate,                            ## define outcome variable
+    method.args = list(family = binomial),  ## define what type of glm want to run (logistic)
+    exponentiate = TRUE                     ## exponentiate to produce odds ratios (rather than log odds)
+  )
+
+univ_tab
+```
+
+
+
+
+##Multivariate Regression
+```{r}
+
+mv_reg <- glm(Malignant_neoplasm_of_prostate ~ Sex + Age + CHEK2_Status+Smoking_Status,family = "binomial", data = model_df_wide)
+
+summary(mv_reg)
+
+pacman::p_load(easystats)
+
+## remove the intercept term from your multivariable results
+mv_reg %>% 
+  model_parameters(exponentiate = TRUE) %>% 
+  plot()
+
+## choose a model using forward selection based on AIC
+## you can also do "backward" or "both" by adjusting the direction
+final_mv_reg <- mv_reg %>%
+  step(direction = "forward", trace = FALSE)
+
+mv_tab_base <- final_mv_reg %>% 
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%  ## get a tidy dataframe of estimates 
+  mutate(across(where(is.numeric), round, digits = 2))     
+
+mv_tab <- tbl_regression(final_mv_reg, exponentiate = TRUE)
+
+
+## combine with univariate results 
+tbl_merge(
+  tbls = list(univ_tab, mv_tab),                          # combine
+  tab_spanner = c("**Univariate**", "**Multivariable**")) # set header names
+
+```
+
+
+#Malignant Neoplasm of Bronchus and Lung
+
+#Univariate
+```{r}
+models <- explanatory_vars %>%       # begin with variables of interest
+  str_c("Malignant_neoplasm_of_bronchus_and_lung ~ ", .) %>%         # combine each variable into formula ("outcome ~ variable of interest")
+  # iterate through each univariate formula
+  map(                               
+    .f = ~glm(                       # pass the formulas one-by-one to glm()
+      formula = as.formula(.x),      # within glm(), the string formula is .x
+      family = "binomial",           # specify type of glm (logistic)
+      data = model_df_wide)) %>%          # dataset
+  
+  # tidy up each of the glm regression outputs from above
+  map(
+    .f = ~tidy(
+      .x, 
+      exponentiate = TRUE,           # exponentiate 
+      conf.int = TRUE)) %>%          # return confidence intervals
+  
+  # collapse the list of regression outputs in to one data frame
+  bind_rows() %>% 
+  
+  # round all numeric columns
+  mutate(across(where(is.numeric), round, digits = 2))
+
+
+univ_tab <- model_df_wide %>% 
+  dplyr::select(explanatory_vars, Malignant_neoplasm_of_bronchus_and_lung) %>% ## select variables of interest
+
+  tbl_uvregression(                         ## produce univariate table
+    method = glm,                           ## define regression want to run (generalised linear model)
+    y = Malignant_neoplasm_of_bronchus_and_lung,                            ## define outcome variable
+    method.args = list(family = binomial),  ## define what type of glm want to run (logistic)
+    exponentiate = TRUE                     ## exponentiate to produce odds ratios (rather than log odds)
+  )
+
+univ_tab
+
+
+##Multivariate Regression
+
+mv_reg <- glm(Malignant_neoplasm_of_bronchus_and_lung ~ Sex + Age + CHEK2_Status+Smoking_Status,family = "binomial", data = model_df_wide)
+
+summary(mv_reg)
+
+pacman::p_load(easystats)
+
+## remove the intercept term from your multivariable results
+mv_reg %>% 
+  model_parameters(exponentiate = TRUE) %>% 
+  plot()
+
+## choose a model using forward selection based on AIC
+## you can also do "backward" or "both" by adjusting the direction
+final_mv_reg <- mv_reg %>%
+  step(direction = "forward", trace = FALSE)
+
+mv_tab_base <- final_mv_reg %>% 
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%  ## get a tidy dataframe of estimates 
+  mutate(across(where(is.numeric), round, digits = 2))     
+
+mv_tab <- tbl_regression(final_mv_reg, exponentiate = TRUE)
+
+
+## combine with univariate results 
+tbl_merge(
+  tbls = list(univ_tab, mv_tab),                          # combine
+  tab_spanner = c("**Univariate**", "**Multivariable**")) # set header names
+
+```
+
+
+
+
+#Malignant Neoplasm of Thyroid
+
+#Univariate
+```{r}
+models <- explanatory_vars %>%       # begin with variables of interest
+  str_c("Malignant_neoplasm_of_thyroid_gland ~ ", .) %>%         # combine each variable into formula ("outcome ~ variable of interest")
+  # iterate through each univariate formula
+  map(                               
+    .f = ~glm(                       # pass the formulas one-by-one to glm()
+      formula = as.formula(.x),      # within glm(), the string formula is .x
+      family = "binomial",           # specify type of glm (logistic)
+      data = model_df_wide)) %>%          # dataset
+  
+  # tidy up each of the glm regression outputs from above
+  map(
+    .f = ~tidy(
+      .x, 
+      exponentiate = TRUE,           # exponentiate 
+      conf.int = TRUE)) %>%          # return confidence intervals
+  
+  # collapse the list of regression outputs in to one data frame
+  bind_rows() %>% 
+  
+  # round all numeric columns
+  mutate(across(where(is.numeric), round, digits = 2))
+
+
+univ_tab <- model_df_wide %>% 
+  dplyr::select(explanatory_vars, Malignant_neoplasm_of_thyroid_gland) %>% ## select variables of interest
+
+  tbl_uvregression(                         ## produce univariate table
+    method = glm,                           ## define regression want to run (generalised linear model)
+    y = Malignant_neoplasm_of_thyroid_gland,                            ## define outcome variable
+    method.args = list(family = binomial),  ## define what type of glm want to run (logistic)
+    exponentiate = TRUE                     ## exponentiate to produce odds ratios (rather than log odds)
+  )
+
+univ_tab
+
+
+##Multivariate Regression
+
+mv_reg <- glm(Malignant_neoplasm_of_thyroid_gland ~ Sex + Age + CHEK2_Status+Smoking_Status,family = "binomial", data = model_df_wide)
+
+summary(mv_reg)
+
+pacman::p_load(easystats)
+
+## remove the intercept term from your multivariable results
+mv_reg %>% 
+  model_parameters(exponentiate = TRUE) %>% 
+  plot()
+
+## choose a model using forward selection based on AIC
+## you can also do "backward" or "both" by adjusting the direction
+final_mv_reg <- mv_reg %>%
+  step(direction = "forward", trace = FALSE)
+
+mv_tab_base <- final_mv_reg %>% 
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%  ## get a tidy dataframe of estimates 
+  mutate(across(where(is.numeric), round, digits = 2))     
+
+mv_tab <- tbl_regression(final_mv_reg, exponentiate = TRUE)
+
+
+## combine with univariate results 
+tbl_merge(
+  tbls = list(univ_tab, mv_tab),                          # combine
+  tab_spanner = c("**Univariate**", "**Multivariable**")) # set header names
+
+```
+
+
+
+
+
+
+
+
+#Malignant Neoplasm of Thyroid
+
+#Univariate
+```{r}
+models <- explanatory_vars %>%       # begin with variables of interest
+  str_c("Malignant_neoplasm_of_colon ~ ", .) %>%         # combine each variable into formula ("outcome ~ variable of interest")
+  # iterate through each univariate formula
+  map(                               
+    .f = ~glm(                       # pass the formulas one-by-one to glm()
+      formula = as.formula(.x),      # within glm(), the string formula is .x
+      family = "binomial",           # specify type of glm (logistic)
+      data = model_df_wide)) %>%          # dataset
+  
+  # tidy up each of the glm regression outputs from above
+  map(
+    .f = ~tidy(
+      .x, 
+      exponentiate = TRUE,           # exponentiate 
+      conf.int = TRUE)) %>%          # return confidence intervals
+  
+  # collapse the list of regression outputs in to one data frame
+  bind_rows() %>% 
+  
+  # round all numeric columns
+  mutate(across(where(is.numeric), round, digits = 2))
+
+
+univ_tab <- model_df_wide %>% 
+  dplyr::select(explanatory_vars, Malignant_neoplasm_of_colon) %>% ## select variables of interest
+
+  tbl_uvregression(                         ## produce univariate table
+    method = glm,                           ## define regression want to run (generalised linear model)
+    y = Malignant_neoplasm_of_colon,                            ## define outcome variable
+    method.args = list(family = binomial),  ## define what type of glm want to run (logistic)
+    exponentiate = TRUE                     ## exponentiate to produce odds ratios (rather than log odds)
+  )
+
+univ_tab
+
+
+##Multivariate Regression
+
+mv_reg <- glm(Malignant_neoplasm_of_colon ~ Sex + Age + CHEK2_Status+Smoking_Status,family = "binomial", data = model_df_wide)
+
+summary(mv_reg)
+
+pacman::p_load(easystats)
+
+## remove the intercept term from your multivariable results
+mv_reg %>% 
+  model_parameters(exponentiate = TRUE) %>% 
+  plot()
+
+## choose a model using forward selection based on AIC
+## you can also do "backward" or "both" by adjusting the direction
+final_mv_reg <- mv_reg %>%
+  step(direction = "forward", trace = FALSE)
+
+mv_tab_base <- final_mv_reg %>% 
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE) %>%  ## get a tidy dataframe of estimates 
+  mutate(across(where(is.numeric), round, digits = 2))     
+
+mv_tab <- tbl_regression(final_mv_reg, exponentiate = TRUE)
+
+
+## combine with univariate results 
+tbl_merge(
+  tbls = list(univ_tab, mv_tab),                          # combine
+  tab_spanner = c("**Univariate**", "**Multivariable**")) # set header names
+
+```
+
+Cumulative Incidence
+```{r}
+library(ggplot2)
+library(dplyr)
+
+cumulative_case_counts <- model_df_final %>% 
+  count(Age) %>%                # count of rows per day (returned in column "n")   
+  mutate(                         
+    cumulative_cases = cumsum(n)       # new column of the cumulative number of rows at each date
+    )
+
+plot_cumulative <- ggplot()+
+  geom_line(
+    data = cumulative_case_counts,
+    aes(x = Age, y = cumulative_cases),
+    size = 2,
+    color = "blue")
+
+plot_cumulative
+
+
+# Compute cumulative counts for each CHEK2_Status group
+cumulative_case_counts <- model_df_final %>%
+  group_by(CHEK2_Status, Age) %>%
+  count() %>%
+  mutate(cumulative_cases = cumsum(n))
+
+# Plot cumulative incidence with different colors for CHEK2_Status
+plot_cumulative <- ggplot(data = cumulative_case_counts, aes(x = Age, y = cumulative_cases, color = CHEK2_Status)) +
+  geom_line(size = 2) +
+  labs(title = "Cumulative Incidence of Cancer by Age",
+       x = "Age of Onset",
+       y = "Cumulative Cases",
+       color = "CHEK2 Status") + 
+  theme_minimal()
+
+# Display the plot
+plot_cumulative
+```
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Filter for Malignant_Cancer_Status == 1, round Age, and compute cumulative counts
+cumulative_case_counts <- model_df_final %>%
+  filter(Malignant_Cancer_Status == 1) %>%  # Keep only rows with cancer status = 1
+  mutate(Age = round(Age)) %>%  # Round Age to nearest integer
+  group_by(CHEK2_Status, Age) %>%
+  count() %>%
+  arrange(CHEK2_Status, Age) %>%  # Ensure sorting before cumulative sum
+  group_by(CHEK2_Status) %>%  # Group by CHEK2_Status before cumsum
+  mutate(cumulative_cases = cumsum(n))
+
+# Compute total individuals in each CHEK2_Status group (denominator)
+total_counts <- model_df_final %>%
+  group_by(CHEK2_Status) %>%
+  summarise(total_individuals = n())
+
+# Merge with cumulative counts and normalize
+cumulative_case_counts <- cumulative_case_counts %>%
+  left_join(total_counts, by = "CHEK2_Status") %>%
+  mutate(normalized_cumulative_cases = cumulative_cases / total_individuals)
+
+# Plot cumulative incidence as a proportion of each group with updated legend labels
+plot_cumulative <- ggplot(data = cumulative_case_counts, aes(x = Age, y = normalized_cumulative_cases, color = as.factor(CHEK2_Status))) +
+  geom_line(size = 1.5) +  # Ensure line plot
+  scale_color_manual(name = "CHEK2 Status", 
+                     values = c("0" = "blue", "1" = "red"),  # Assign colors
+                     labels = c("0" = "CHEK2(WT)", "1" = "CHEK2(P/LP)")) +  # Update legend labels
+  labs(title = "Normalized Cumulative Incidence of Cancer by Age",
+       x = "Age of Onset",
+       y = "Proportion of Affected Individuals") + 
+  theme_minimal()
+
+# Display the plot
+plot_cumulative
+
+```
+
